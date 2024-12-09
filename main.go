@@ -12,6 +12,7 @@ import (
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	"github.com/joho/godotenv"
 )
 
 type CoinGeckoResponse struct {
@@ -34,6 +35,10 @@ var (
 
 func init() {
 	var err error
+
+	if err = godotenv.Load(); err != nil {
+		log.Fatal("Error loading .env file")
+	}
 
 	botToken := os.Getenv("TELEGRAM_BOT_TOKEN")
 	if botToken == "" {
