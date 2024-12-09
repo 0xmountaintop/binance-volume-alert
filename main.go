@@ -9,6 +9,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
@@ -28,9 +29,8 @@ type VolumeData struct {
 }
 
 var (
-	bot        *tgbotapi.BotAPI
-	chatID     int64
-	monitoring bool = false
+	bot              *tgbotapi.BotAPI
+	monitoringStatus sync.Map
 )
 
 func init() {
@@ -124,7 +124,7 @@ func getBinanceVolume(symbol string) (*VolumeData, error) {
 	}, nil
 }
 
-func sendAlert(symbol string, data *VolumeData) {
+func sendAlert(chatID int64, symbol string, data *VolumeData) {
 	message := fmt.Sprintf("⚠️ Volume Alert for %s\n"+
 		"Previous Hour Volume: %.2f\n"+
 		"Current Hour Volume: %.2f\n"+
@@ -142,12 +142,17 @@ func sendAlert(symbol string, data *VolumeData) {
 	}
 }
 
-func startMonitoring() {
-	monitoring = true
+func startMonitoring(chatID int64) {
+	monitoringStatus.Store(chatID, true)
 	msg := tgbotapi.NewMessage(chatID, "Volume monitoring started! You will receive alerts when volume increases more than 5x.")
 	bot.Send(msg)
 
-	for monitoring {
+	for {
+		monitoring, _ := monitoringStatus.Load(chatID)
+		if !monitoring.(bool) {
+			return
+		}
+
 		symbols, err := getMarketCapRank()
 		if err != nil {
 			log.Printf("Error getting market cap rank: %v\n", err)
@@ -156,7 +161,8 @@ func startMonitoring() {
 		}
 
 		for _, symbol := range symbols {
-			if !monitoring {
+			monitoring, _ := monitoringStatus.Load(chatID)
+			if !monitoring.(bool) {
 				return
 			}
 
@@ -167,19 +173,19 @@ func startMonitoring() {
 			}
 
 			if volumeData != nil && volumeData.Ratio > 5 {
-				sendAlert(symbol, volumeData)
+				sendAlert(chatID, symbol, volumeData)
 			}
 
 			time.Sleep(100 * time.Millisecond)
 		}
 
-		log.Printf("Check completed at %s\n", time.Now().Format("2006-01-02 15:04:05"))
+		log.Printf("Check completed for chat %d at %s\n", chatID, time.Now().Format("2006-01-02 15:04:05"))
 		time.Sleep(5 * time.Minute)
 	}
 }
 
-func stopMonitoring() {
-	monitoring = false
+func stopMonitoring(chatID int64) {
+	monitoringStatus.Store(chatID, false)
 	msg := tgbotapi.NewMessage(chatID, "Volume monitoring stopped!")
 	bot.Send(msg)
 }
@@ -195,7 +201,7 @@ func handleCommands() {
 			continue
 		}
 
-		chatID = update.Message.Chat.ID
+		chatID := update.Message.Chat.ID
 
 		if !update.Message.IsCommand() {
 			continue
@@ -212,16 +218,20 @@ func handleCommands() {
 			bot.Send(msg)
 
 		case "monitor":
-			if !monitoring {
-				go startMonitoring()
+			monitoring, _ := monitoringStatus.Load(chatID)
+			isMonitoring := monitoring != nil && monitoring.(bool)
+			if !isMonitoring {
+				go startMonitoring(chatID)
 			} else {
 				msg := tgbotapi.NewMessage(chatID, "Monitoring is already running!")
 				bot.Send(msg)
 			}
 
 		case "stop":
-			if monitoring {
-				stopMonitoring()
+			monitoring, _ := monitoringStatus.Load(chatID)
+			isMonitoring := monitoring != nil && monitoring.(bool)
+			if isMonitoring {
+				stopMonitoring(chatID)
 			} else {
 				msg := tgbotapi.NewMessage(chatID, "Monitoring is not running!")
 				bot.Send(msg)
@@ -229,7 +239,8 @@ func handleCommands() {
 
 		case "status":
 			status := "stopped"
-			if monitoring {
+			monitoring, _ := monitoringStatus.Load(chatID)
+			if monitoring != nil && monitoring.(bool) {
 				status = "running"
 			}
 			msg := tgbotapi.NewMessage(chatID, fmt.Sprintf("Monitoring is currently %s", status))
