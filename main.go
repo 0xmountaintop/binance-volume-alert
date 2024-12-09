@@ -4,10 +4,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
+	"log"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
+
+	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
 type CoinGeckoResponse struct {
@@ -20,6 +24,28 @@ type VolumeData struct {
 	PrevVolume float64
 	CurrVolume float64
 	Ratio      float64
+}
+
+var (
+	bot        *tgbotapi.BotAPI
+	chatID     int64
+	monitoring bool = false
+)
+
+func init() {
+	var err error
+
+	botToken := os.Getenv("TELEGRAM_BOT_TOKEN")
+	if botToken == "" {
+		log.Fatal("TELEGRAM_BOT_TOKEN environment variable is not set")
+	}
+
+	bot, err = tgbotapi.NewBotAPI(botToken)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	log.Printf("Authorized on account %s", bot.Self.UserName)
 }
 
 func getMarketCapRank() ([]string, error) {
@@ -59,7 +85,6 @@ func getBinanceVolume(symbol string) (*VolumeData, error) {
 	}
 	defer resp.Body.Close()
 
-	// Handle invalid trading pairs
 	if resp.StatusCode == 400 {
 		return nil, nil
 	}
@@ -94,43 +119,121 @@ func getBinanceVolume(symbol string) (*VolumeData, error) {
 	}, nil
 }
 
-func alert(symbol string, data *VolumeData) {
-	fmt.Println(strings.Repeat("=", 50))
-	fmt.Printf("⚠️ Volume Alert for %s\n", symbol)
-	fmt.Printf("Previous Hour Volume: %.2f\n", data.PrevVolume)
-	fmt.Printf("Current Hour Volume: %.2f\n", data.CurrVolume)
-	fmt.Printf("Volume Ratio: %.2fx\n", data.Ratio)
-	fmt.Printf("Time: %s\n", time.Now().Format("2006-01-02 15:04:05"))
-	fmt.Println(strings.Repeat("=", 50))
+func sendAlert(symbol string, data *VolumeData) {
+	message := fmt.Sprintf("⚠️ Volume Alert for %s\n"+
+		"Previous Hour Volume: %.2f\n"+
+		"Current Hour Volume: %.2f\n"+
+		"Volume Ratio: %.2fx\n"+
+		"Time: %s",
+		symbol,
+		data.PrevVolume,
+		data.CurrVolume,
+		data.Ratio,
+		time.Now().Format("2006-01-02 15:04:05"))
+
+	msg := tgbotapi.NewMessage(chatID, message)
+	if _, err := bot.Send(msg); err != nil {
+		log.Printf("Error sending alert: %v", err)
+	}
 }
 
-func main() {
-	fmt.Println("Starting volume monitor...")
+func startMonitoring() {
+	monitoring = true
+	msg := tgbotapi.NewMessage(chatID, "Volume monitoring started! You will receive alerts when volume increases more than 5x.")
+	bot.Send(msg)
 
-	for {
+	for monitoring {
 		symbols, err := getMarketCapRank()
 		if err != nil {
-			fmt.Printf("Error getting market cap rank: %v\n", err)
+			log.Printf("Error getting market cap rank: %v\n", err)
 			time.Sleep(5 * time.Minute)
 			continue
 		}
 
 		for _, symbol := range symbols {
+			if !monitoring {
+				return
+			}
+
 			volumeData, err := getBinanceVolume(symbol)
 			if err != nil {
-				fmt.Printf("Error getting volume data for %s: %v\n", symbol, err)
+				log.Printf("Error getting volume data for %s: %v\n", symbol, err)
 				continue
 			}
 
 			if volumeData != nil && volumeData.Ratio > 5 {
-				alert(symbol, volumeData)
+				sendAlert(symbol, volumeData)
 			}
 
-			// Rate limiting
 			time.Sleep(100 * time.Millisecond)
 		}
 
-		fmt.Printf("Check completed at %s\n", time.Now().Format("2006-01-02 15:04:05"))
+		log.Printf("Check completed at %s\n", time.Now().Format("2006-01-02 15:04:05"))
 		time.Sleep(5 * time.Minute)
 	}
+}
+
+func stopMonitoring() {
+	monitoring = false
+	msg := tgbotapi.NewMessage(chatID, "Volume monitoring stopped!")
+	bot.Send(msg)
+}
+
+func handleCommands() {
+	u := tgbotapi.NewUpdate(0)
+	u.Timeout = 60
+
+	updates := bot.GetUpdatesChan(u)
+
+	for update := range updates {
+		if update.Message == nil {
+			continue
+		}
+
+		chatID = update.Message.Chat.ID
+
+		if !update.Message.IsCommand() {
+			continue
+		}
+
+		switch update.Message.Command() {
+		case "start":
+			msg := tgbotapi.NewMessage(chatID,
+				"Welcome to Binance Volume Monitor Bot!\n\n"+
+					"Available commands:\n"+
+					"/monitor - Start volume monitoring\n"+
+					"/stop - Stop volume monitoring\n"+
+					"/status - Check monitoring status")
+			bot.Send(msg)
+
+		case "monitor":
+			if !monitoring {
+				go startMonitoring()
+			} else {
+				msg := tgbotapi.NewMessage(chatID, "Monitoring is already running!")
+				bot.Send(msg)
+			}
+
+		case "stop":
+			if monitoring {
+				stopMonitoring()
+			} else {
+				msg := tgbotapi.NewMessage(chatID, "Monitoring is not running!")
+				bot.Send(msg)
+			}
+
+		case "status":
+			status := "stopped"
+			if monitoring {
+				status = "running"
+			}
+			msg := tgbotapi.NewMessage(chatID, fmt.Sprintf("Monitoring is currently %s", status))
+			bot.Send(msg)
+		}
+	}
+}
+
+func main() {
+	log.Println("Starting Binance Volume Monitor Bot...")
+	handleCommands()
 }
