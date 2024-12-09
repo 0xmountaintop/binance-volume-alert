@@ -33,6 +33,10 @@ var (
 	monitoringStatus sync.Map
 )
 
+const (
+	statusFile = "monitoring_status.json"
+)
+
 func init() {
 	var err error
 
@@ -142,8 +146,55 @@ func sendAlert(chatID int64, symbol string, data *VolumeData) {
 	}
 }
 
+func saveMonitoringStatus() {
+	statusMap := make(map[int64]bool)
+
+	monitoringStatus.Range(func(key, value interface{}) bool {
+		chatID := key.(int64)
+		status := value.(bool)
+		statusMap[chatID] = status
+		return true
+	})
+
+	data, err := json.Marshal(statusMap)
+	if err != nil {
+		log.Printf("Error marshaling monitoring status: %v", err)
+		return
+	}
+
+	err = ioutil.WriteFile(statusFile, data, 0644)
+	if err != nil {
+		log.Printf("Error saving monitoring status: %v", err)
+	}
+}
+
+func loadMonitoringStatus() {
+	data, err := ioutil.ReadFile(statusFile)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			log.Printf("Error reading monitoring status file: %v", err)
+		}
+		return
+	}
+
+	statusMap := make(map[int64]bool)
+	err = json.Unmarshal(data, &statusMap)
+	if err != nil {
+		log.Printf("Error unmarshaling monitoring status: %v", err)
+		return
+	}
+
+	for chatID, status := range statusMap {
+		monitoringStatus.Store(chatID, status)
+		if status {
+			go startMonitoring(chatID)
+		}
+	}
+}
+
 func startMonitoring(chatID int64) {
 	monitoringStatus.Store(chatID, true)
+	saveMonitoringStatus()
 	msg := tgbotapi.NewMessage(chatID, "Volume monitoring started! You will receive alerts when volume increases more than 5x.")
 	bot.Send(msg)
 
@@ -186,6 +237,7 @@ func startMonitoring(chatID int64) {
 
 func stopMonitoring(chatID int64) {
 	monitoringStatus.Store(chatID, false)
+	saveMonitoringStatus()
 	msg := tgbotapi.NewMessage(chatID, "Volume monitoring stopped!")
 	bot.Send(msg)
 }
@@ -251,5 +303,6 @@ func handleCommands() {
 
 func main() {
 	log.Println("Starting Binance Volume Monitor Bot...")
+	loadMonitoringStatus()
 	handleCommands()
 }
